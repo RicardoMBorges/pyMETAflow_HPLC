@@ -212,8 +212,6 @@ def create_stacked_chromatogram_plot(dataframe,
     if show_fig:
         fig.show()
 
-
-
 def create_vertical_multiplot(dataframes, titles,
                               x_axis_col='RT(min)', 
                               start_column=1, end_column=None, 
@@ -262,10 +260,8 @@ def create_vertical_multiplot(dataframes, titles,
         
     return fig
 
-
-
 # --------------------------------------------------------------------------
-#                    3) Filtering & Substitution Functions
+#                    3) Removing Regions Functions
 # --------------------------------------------------------------------------
 def filter_rt_range(data, start_rt, end_rt, axis_column=None):
     """
@@ -393,7 +389,7 @@ def create_fraction_chromatogram_plot(dataframe,
         fig.show()
 
 # --------------------------------------------------------------------------
-#                    6) RAFFT & PAFFT Alignment
+#                    6) Data Referencing & Alignment
 # --------------------------------------------------------------------------
 def ref_spectra_to_df(df, thresh=0.01, offsetppm=None, interactive=True, testThreshold=False, xlim=(-0.7, 0.7)):
     """
@@ -719,7 +715,7 @@ def align_samples_using_icoshift(df, n_intervals=50, target='maxcorr'):
     return aligned_df
 
 # --------------------------------------------------------------------------
-#                    7) Normalization & Scaling
+#                    7) CENTERING, NORMALIZATION & SCALING FUNCTIONS
 # --------------------------------------------------------------------------
 def log_transform(df, constant=1):
     return np.log10(df + constant)
@@ -804,6 +800,61 @@ def median_normalize(df, target_median=1.0, exclude_columns=None):
             if median_val != 0:
                 df[column] = (df[column] / median_val) * target_median
     return df
+
+def quantile_normalize(df, exclude_columns=None):
+    """
+    Perform quantile normalization on the DataFrame, excluding columns specified in exclude_columns,
+    and always excluding 'RT(min)' and 'Chemical Shift (ppm)'.
+    
+    Parameters:
+    - df (pd.DataFrame): Input DataFrame.
+    - exclude_columns (list, optional): Additional columns to exclude from normalization.
+    
+    Returns:
+    - pd.DataFrame: Quantile normalized DataFrame.
+    """
+    df = df.copy()
+    # Ensure these columns are always excluded
+    if exclude_columns is None:
+        exclude_columns = ["RT(min)", "Chemical Shift (ppm)"]
+    else:
+        exclude_columns = list(set(exclude_columns + ["RT(min)", "Chemical Shift (ppm)"]))
+    
+    # Select only numeric columns for normalization
+    norm_cols = [col for col in df.columns if col not in exclude_columns]
+    df_numeric = df[norm_cols]
+
+    # Get the shape of the numeric DataFrame
+    sorted_df = pd.DataFrame(
+        np.sort(df_numeric.values, axis=0),
+        index=df_numeric.index,
+        columns=df_numeric.columns
+    )
+    
+    # Compute the mean of each row (i.e., rank across samples)
+    rank_means = sorted_df.mean(axis=1)
+    
+    # Create a new DataFrame to store normalized values
+    df_normalized = df_numeric.copy()
+    
+    # For each column, map the sorted ranks to the average values
+    for col in df_numeric.columns:
+        # Get the order of values (indices that would sort the column)
+        order = df_numeric[col].argsort()
+        # Create a Series with the rank means corresponding to the sorted order
+        normalized_vals = pd.Series(rank_means.values, index=order)
+        # Reorder the values to the original order of the data
+        df_normalized[col] = normalized_vals.sort_index().values
+
+    # Merge back the excluded columns unchanged
+    for col in exclude_columns:
+        df_normalized[col] = df[col]
+    
+    # Reorder columns to match the original DataFrame
+    df_normalized = df_normalized[df.columns]
+    
+    return df_normalized
+
 
 
 import numpy as np
@@ -992,7 +1043,7 @@ def plot_histogram_with_distribution(data, output_dir='images', file_name='histo
     return fig
 
 # --------------------------------------------------------------------------
-#                    8) STOCSY
+#                    8) STOCSY FUNCTIONS
 # --------------------------------------------------------------------------
 def STOCSY_LC(target,X,ppm):
     """
@@ -1110,7 +1161,7 @@ Data-Processing Report
     print(report.strip())
 
 # --------------------------------------------------------------------------
-#                    10) PCA Functions
+#                    10) PCA & PLS-DA, VIP FUNCTIONS
 # --------------------------------------------------------------------------
 def pca_plot(normalized_df,
              df_metadata,
@@ -1273,9 +1324,7 @@ def plot_pca_scores(scores_df, pc_x, pc_y, explained_variance):
     fig.update_traces(marker=dict(size=7), selector=dict(mode='markers+text'))
     fig.show()
 
-# --------------------------------------------------------------------------
-#                    11) PLS-DA Functions
-# --------------------------------------------------------------------------
+
 import os
 import numpy as np
 import pandas as pd
@@ -1903,104 +1952,8 @@ def calculate_vip_scores(pls_model, X):
 
 
 
-
 # --------------------------------------------------------------------------
-#                    12) STOCSY Functions
-# --------------------------------------------------------------------------
-
-
-def STOCSY_LC(target,X,ppm):
-    """
-    Function designed to calculate covariance/correlation and plots its color coded projection for LC-DAD data.
-    """
-    import numpy as np
-    from scipy import stats
-    import matplotlib.pyplot as plt
-    from matplotlib import collections as mc
-    import pylab as pl
-    import math
-    import os
-    
-    if type(target) == float:
-        idx = np.abs(ppm - target).idxmin()
-        target_vect = X.iloc[idx]
-    else:
-        target_vect = target
-    
-    corr = (stats.zscore(target_vect.T,ddof=1)@stats.zscore(X.T,ddof=1))/((X.T.shape[0])-1)
-    covar = (target_vect-(target_vect.mean()))@(X.T-(np.tile(X.T.mean(),(X.T.shape[0],1))))/((X.T.shape[0])-1)
-    
-    x = np.linspace(0, len(covar), len(covar))
-    y = covar
-    points = np.array([x, y]).T.reshape(-1, 1, 2)
-    segments = np.concatenate([points[:-1], points[1:]], axis=1)
-    
-    fig, axs = plt.subplots(1, 1, sharex=True, sharey=True, figsize=(16,4))
-    norm = plt.Normalize(corr.min(), corr.max())
-    lc = mc.LineCollection(segments, cmap='jet', norm=norm)
-    lc.set_array(corr)
-    lc.set_linewidth(2)
-    line = axs.add_collection(lc)
-    fig.colorbar(line, ax=axs)
-    axs.set_xlim(x.min(), x.max())
-    axs.set_ylim(y.min(), y.max())
-    
-    minppm = min(ppm)
-    maxppm = max(ppm)
-    ticksx = []
-    tickslabels = []
-    if maxppm<30:
-       ticks = np.linspace(int(math.ceil(minppm)), int(maxppm), int(maxppm)-math.ceil(minppm)+1)
-    else:
-       ticks = np.linspace(int(math.ceil(minppm / 10.0)) * 10, (int(math.ceil(maxppm / 10.0)) * 10)-10, int(math.ceil(maxppm / 10.0))-int(math.ceil(minppm / 10.0)))
-    currenttick=0
-    for p in ppm:
-       if currenttick<len(ticks) and p>ticks[currenttick]:
-           position=int((p-minppm)/(maxppm-minppm)*max(x))
-           if position<len(x):
-               ticksx.append(x[position])
-               tickslabels.append(ticks[currenttick])
-           currenttick+=1
-    plt.xticks(ticksx,tickslabels, fontsize=10)
-    axs.set_xlabel('RT (min)', fontsize=12)
-    axs.set_ylabel(f"Covariance with \n signal at {target:.2f} min", fontsize=12)
-    axs.set_title(f'STOCSY from signal at {target:.2f} min', fontsize=14)
-    
-    text = axs.text(1, 1, '')
-    lnx = plt.plot([60,60], [0,1.5], color='black', linewidth=0.3)
-    lny = plt.plot([0,100], [1.5,1.5], color='black', linewidth=0.3)
-    lnx[0].set_linestyle('None')
-    lny[0].set_linestyle('None')
-    
-    def hover(event):
-        if event.inaxes == axs:
-            maxcoord=axs.transData.transform((x[0], 0))[0]
-            mincoord=axs.transData.transform((x[len(x)-1], 0))[0]
-            val=((maxcoord-mincoord)-(event.x-mincoord))/(maxcoord-mincoord)*(maxppm-minppm)+minppm
-            c=covar[int(((maxcoord-mincoord)-(event.x-mincoord))/(maxcoord-mincoord)*len(covar))]
-            r=corr[int(((maxcoord-mincoord)-(event.x-mincoord))/(maxcoord-mincoord)*len(corr))]
-            text.set_visible(True)
-            text.set_position((event.xdata, event.ydata))
-            text.set_text('{:.2f}'.format(val)+" min, covariance: "+'{:.6f}'.format(c)+", correlation: "+'{:.2f}'.format(r))
-            lnx[0].set_data([event.xdata, event.xdata], [-1, 1])
-            lnx[0].set_linestyle('--')
-            lny[0].set_data([x[0],x[len(x)-1]], [c,c])
-            lny[0].set_linestyle('--')
-        else:
-            text.set_visible(False)
-            lnx[0].set_linestyle('None')
-            lny[0].set_linestyle('None')
-        fig.canvas.draw_idle()
-
-    fig.canvas.mpl_connect("motion_notify_event", hover)    
-    pl.show()
-    if not os.path.exists('images'):
-        os.mkdir('images')
-    plt.savefig(f"images/stocsy_from_{target}.pdf", transparent=True, dpi=300)
-    return corr, covar, fig
-
-# --------------------------------------------------------------------------
-#                    13) Data-Export
+#                    11) Data-Export
 # --------------------------------------------------------------------------
 def sanitize_string(s):
     """
@@ -2105,7 +2058,7 @@ def export_metaboanalyst_lc(normalized_df, df_metadata,
 
 
 # --------------------------------------------------------------------------
-#                    14) Data-Processing Report
+#                    12) Data-Processing Report
 # --------------------------------------------------------------------------
 def print_data_processing_report(start_rt, end_rt, samples_to_remove,
                                  aligned_method, normalization_method,
