@@ -54,85 +54,82 @@ The pyMETAflow workflow covers the following key steps:
 The repository includes the main processing script (data_processing_HPLC.py) and a Jupyter Notebook demonstrating the workflow (notebooks/pyMETAflow_LC_UV.ipynb). Below are some usage examples:
 Data Import and Preprocessing
 
-import data_processing_LC as dp
+    import data_processing_LC as dp
 
 ### Convert .txt files to CSV and combine them
-input_folder = r'path/to/your/data'
-dp.process_txt_files(input_folder)
-data_folder = os.path.join(input_folder, 'data')
-combined_df = dp.combine_csv_files(data_folder, output_csv=os.path.join(data_folder, 'combined.csv'))
+    input_folder = r'path/to/your/data'
+    dp.process_txt_files(input_folder)
+    data_folder = os.path.join(input_folder, 'data')
+    combined_df = dp.combine_csv_files(data_folder, output_csv=os.path.join(data_folder, 'combined.csv'))
 
 ## Visualization and Peak Detection
 
 ### Create overlapping chromatogram plot
-dp.create_chromatogram_plot(combined_df, x_axis_col='RT(min)', start_column=1, end_column=25)
+    dp.create_chromatogram_plot(combined_df, x_axis_col='RT(min)', start_column=1, end_column=25)
 
 ### Detect and visualize peaks
-peaks_df = dp.analyze_and_visualize_peaks(
-    combined_df,
-    x_axis_col='RT(min)',
-    start_column=1,
-    end_column=25,
-    peak_height=50000,
-    peaks_csv_path='images/peaks_count.csv',
-    visualization_dir='images/peaks_visualization'
-)
+    peaks_df = dp.analyze_and_visualize_peaks(
+        combined_df,
+        x_axis_col='RT(min)',
+        start_column=1,
+        end_column=25,
+        peak_height=50000,
+        peaks_csv_path='images/peaks_count.csv',
+        visualization_dir='images/peaks_visualization'
+    )
 
 ## Data Alignment
 
 ### Align data using iCOshift, RAFFT, or PAFFT
-aligned_icoshift = dp.align_samples_using_icoshift(combined_df)
-aligned_RAFFT = dp.align_RAFFT_df(combined_df, reference_idx=1, shift_RT=0.3, lookahead=1)
-aligned_PAFFT = dp.align_PAFFT_df(combined_df, segSize_RT=0.4, reference_idx=0, shift_RT=0.4)
+    aligned_icoshift = dp.align_samples_using_icoshift(combined_df)
+    aligned_RAFFT = dp.align_RAFFT_df(combined_df, reference_idx=1, shift_RT=0.3, lookahead=1)
+    aligned_PAFFT = dp.align_PAFFT_df(combined_df, segSize_RT=0.4, reference_idx=0, shift_RT=0.4)
 
 ## Normalization and Scaling
 
 ### Normalize data using Z-score or PQN normalization
-normalized_df = dp.z_score_normalize(aligned_icoshift, exclude_columns="RT(min)")
-pqn_normalized_df = dp.pqn_normalize(aligned_icoshift, exclude_columns="RT(min)")
+    normalized_df = dp.z_score_normalize(aligned_icoshift, exclude_columns="RT(min)")
+    pqn_normalized_df = dp.pqn_normalize(aligned_icoshift, exclude_columns="RT(min)")
 
 ### Scale data using auto-scaling
-scaled_df = dp.auto_scale(normalized_df, exclude_columns=["RT(min)"])
+    scaled_df = dp.auto_scale(normalized_df, exclude_columns=["RT(min)"])
 
 ## Multivariate Analysis
 
 ### Perform PCA
-pca_model, pca_scores_df = dp.pca_plot(
-    normalized_df=normalized_df,
-    df_metadata=pd.read_csv('Metadata.csv', sep="\t"),
-    sample_id_col='HPLC_filename',
-    classification_col='ATTRIBUTE_classification',
-    n_components=2
-)
+    pca_model, pca_scores_df = dp.pca_plot(
+        normalized_df=normalized_df,
+        df_metadata=pd.read_csv('Metadata.csv', sep="\t"),
+        sample_id_col='HPLC_filename',
+        classification_col='ATTRIBUTE_classification',
+        n_components=2)
 
 ### Perform PLS-DA
-pls_model, scores_df = dp.perform_pls_da(
-    data=normalized_df,
-    metadata=pd.read_csv('Metadata.csv', sep="\t"),
-    group_col="ATTRIBUTE_classification",
-    sample_id_col="HPLC_filename",
-    n_components=2
-)
+    pls_model, scores_df = dp.perform_pls_da(
+        data=normalized_df,
+        metadata=pd.read_csv('Metadata.csv', sep="\t"),
+        group_col="ATTRIBUTE_classification",
+        sample_id_col="HPLC_filename",
+        n_components=2)
 
 ## Data Export
 
 ### Export data in MetaboAnalyst format
-metabo_df = dp.export_metaboanalyst_lc(
-    normalized_df=normalized_df,
-    df_metadata=pd.read_csv('Metadata.csv', sep="\t"),
-    sample_id_col="HPLC_filename",
-    class_col="ATTRIBUTE_classification",
-    output_file="data/MetaboAnalyst_input.csv"
-)
+    metabo_df = dp.export_metaboanalyst_lc(
+        normalized_df=normalized_df,
+        df_metadata=pd.read_csv('Metadata.csv', sep="\t"),
+        sample_id_col="HPLC_filename",
+        class_col="ATTRIBUTE_classification",
+        output_file="data/MetaboAnalyst_input.csv")
 
 ## Repository Structure
-
-pyMETAflow/
-├── data_processing_HPLC.py     # Main processing script
-├── README.md                   # This file
-├── requirements.txt            # Python package dependencies
-└── notebooks/                  # Jupyter notebooks demonstrating the workflow
-    └── pyMETAflow_LC_UV.ipynb
+    pyMETAflow/
+        ├── data_processing_HPLC.py     # Main processing script
+        ├── README.md                   # This file
+        ├── requirements.txt            # Python package dependencies
+        ├── run.bat                     # .bat file for installation
+        └── notebooks/                  # Jupyter notebooks demonstrating the workflow
+            └── pyMETAflow_LC_UV.ipynb
 
 ## License
 
