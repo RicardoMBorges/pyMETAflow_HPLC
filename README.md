@@ -122,14 +122,16 @@ Data Import and Preprocessing
         class_col="ATTRIBUTE_classification",
         output_file="data/MetaboAnalyst_input.csv")
 
-## Repository Structure
+## Organizational Structure
     pyMETAflow/
         ├── data_processing_HPLC.py     # Main processing script
         ├── README.md                   # This file
         ├── requirements.txt            # Python package dependencies
         ├── run.bat                     # .bat file for installation
-        └── notebooks/                  # Jupyter notebooks demonstrating the workflow
-            └── pyMETAflow_LC_UV.ipynb
+        └── project_folder/             # Each project should have its place
+            └── pyMETAflow_LC_UV.ipynb	# Each project should have its Jupyter Notebook to avoid confusion
+            └── Metadata.csv			# Metadata with: Samples, LC_filename, NMR_filename, ATTRIBUTE_classification, etc.
+			└── (ASCIIDataXXX.txt)		# All .txt data (exported using ASCII chromatogram) from Shimadzu HPLC
 
 ## License
 
