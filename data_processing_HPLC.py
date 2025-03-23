@@ -2814,6 +2814,191 @@ def STOCSY_interactive(target, X, min):
     fig.show()
     return corr, covar
 
+def STOCSY_mode(target, X, rt_values, mode="linear"):
+    """
+    Structured STOCSY: Compute correlation and covariance between a target signal and a matrix of signals.
+    
+    Parameters:
+    ----------
+    target : float or Series
+        Target retention time or signal vector for STOCSY anchor.
+    X : DataFrame
+        Data matrix where each row is a signal (e.g., from LC-MS).
+    rt_values : Series
+        Retention time values corresponding to each row in X.
+    mode : str, optional
+        Type of structured correlation model to use:
+            - 'linear'      : Standard Pearson correlation (default).
+            - 'exponential' : Fit exponential decay model.
+            - 'sinusoidal'  : Fit sine wave relationship. Circadian cycles, time dependent analysis.
+            - 'sigmoid'     : Fit logistic dose-response model. Biological activity vs. concentration; saturation effects, enzyme kinetics. Captures thresholds and plateaus (nonlinear dose-response).
+            - 'gaussian'    : Fit bell-shaped relationship. Peak-shaped relationships (e.g. chromatographic peaks, transient events).
+    
+    Returns:
+    -------
+    corr : array
+        Correlation values between target and each signal.
+    covar : array
+        Covariance values between target and each signal.
+    """
+    import os
+    import mpld3
+    import math
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+    from scipy import stats
+    from scipy.optimize import curve_fit
+
+    def exp_model(x, a, b, c):
+        return a * np.exp(-b * x) + c
+
+    def sin_model(x, a, b, c, d):
+        return a * np.sin(b * x + c) + d
+
+    def sigmoid_model(x, L, k, x0):
+        return L / (1 + np.exp(-k * (x - x0)))
+
+    def gauss_model(x, a, mu, sigma, c):
+        return a * np.exp(-(x - mu)**2 / (2 * sigma**2)) + c
+
+    if isinstance(target, float):
+        idx = np.abs(rt_values - target).idxmin()
+        target_vect = X.iloc[idx]
+    else:
+        target_vect = target
+
+    corr = []
+
+    for i in range(X.shape[0]):
+        x = target_vect.values
+        y = X.iloc[i].values
+        try:
+            if mode == "linear":
+                r = np.corrcoef(x, y)[0, 1]
+
+            elif mode == "exponential":
+                popt, _ = curve_fit(exp_model, x, y, maxfev=10000)
+                fitted = exp_model(x, *popt)
+                r = np.corrcoef(y, fitted)[0, 1]
+
+            elif mode == "sinusoidal":
+                guess_freq = 1 / (2 * np.pi)
+                popt, _ = curve_fit(sin_model, x, y, p0=[1, guess_freq, 0, 0], maxfev=10000)
+                fitted = sin_model(x, *popt)
+                r = np.corrcoef(y, fitted)[0, 1]
+
+            elif mode == "sigmoid":
+                x_scaled = (x - np.min(x)) / (np.max(x) - np.min(x))
+                y_scaled = (y - np.min(y)) / (np.max(y) - np.min(y))
+                popt, _ = curve_fit(sigmoid_model, x_scaled, y_scaled, p0=[1, 1, 0.5], maxfev=10000)
+                fitted = sigmoid_model(x_scaled, *popt)
+                r = np.corrcoef(y_scaled, fitted)[0, 1]
+
+            elif mode == "gaussian":
+                mu_init = x[np.argmax(y)]
+                sigma_init = np.std(x)
+                popt, _ = curve_fit(gauss_model, x, y, p0=[1, mu_init, sigma_init, 0], maxfev=10000)
+                fitted = gauss_model(x, *popt)
+                r = np.corrcoef(y, fitted)[0, 1]
+
+            else:
+                raise ValueError("Invalid mode")
+
+        except Exception:
+            r = 0  # Fallback in case of fitting errors
+
+        corr.append(r)
+
+    corr = np.array(corr)
+    covar = (target_vect - target_vect.mean()) @ (X.T - np.tile(X.T.mean(), (X.T.shape[0], 1))) / (X.T.shape[0] - 1)
+
+    # Plotting (unchanged, includes reversed x-axis)
+    x = np.linspace(0, len(covar), len(covar))
+    y = covar
+    points = np.array([x, y]).T.reshape(-1, 1, 2)
+    segments = np.concatenate([points[:-1], points[1:]], axis=1)
+
+    fig, axs = plt.subplots(1, 1, figsize=(16, 4), sharex=True, sharey=True)
+    norm = plt.Normalize(corr.min(), corr.max())
+    lc = LineCollection(segments, cmap='jet', norm=norm)
+    lc.set_array(corr)
+    lc.set_linewidth(2)
+    axs.add_collection(lc)
+    fig.colorbar(lc, ax=axs)
+
+    axs.set_xlim(x.min(), x.max())
+    axs.set_ylim(y.min(), y.max())
+    axs.invert_xaxis()
+
+    # Axis ticks
+    min_rt = rt_values.min()
+    max_rt = rt_values.max()
+    ticksx = []
+    tickslabels = []
+    if max_rt < 30:
+        ticks = np.linspace(math.ceil(min_rt), int(max_rt), int(max_rt) - math.ceil(min_rt) + 1)
+    else:
+        ticks = np.linspace(math.ceil(min_rt / 10.0) * 10,
+                             math.ceil(max_rt / 10.0) * 10 - 10,
+                             math.ceil(max_rt / 10.0) - math.ceil(min_rt / 10.0))
+    currenttick = 0
+    for rt_val in rt_values:
+        if currenttick < len(ticks) and rt_val > ticks[currenttick]:
+            position = int((rt_val - min_rt) / (max_rt - min_rt) * x.max())
+            if position < len(x):
+                ticksx.append(x[position])
+                tickslabels.append(ticks[currenttick])
+            currenttick += 1
+    plt.xticks(ticksx, tickslabels, fontsize=12)
+
+    axs.set_xlabel('ppm', fontsize=14)
+    axs.set_ylabel(f"Covariance with \n signal at {target:.2f} ppm", fontsize=14)
+    axs.set_title(f'STOCSY from signal at {target:.2f} ppm ({mode} model)', fontsize=16)
+
+    text = axs.text(1, 1, '')
+    lnx = plt.plot([60, 60], [0, 1.5], color='black', linewidth=0.3)
+    lny = plt.plot([0, 100], [1.5, 1.5], color='black', linewidth=0.3)
+    lnx[0].set_linestyle('None')
+    lny[0].set_linestyle('None')
+
+    def hover(event):
+        if event.inaxes == axs:
+            inv = axs.transData.inverted()
+            maxcoord = axs.transData.transform((x[0], 0))[0]
+            mincoord = axs.transData.transform((x[-1], 0))[0]
+            rt_val = ((maxcoord - mincoord) - (event.x - mincoord)) / (maxcoord - mincoord) * (max_rt - min_rt) + min_rt
+            i = int(((maxcoord - mincoord) - (event.x - mincoord)) / (maxcoord - mincoord) * len(covar))
+            if 0 <= i < len(covar):
+                cov_val = covar[i]
+                cor_val = corr[i]
+                text.set_visible(True)
+                text.set_position((event.xdata, event.ydata))
+                text.set_text(f'{rt_val:.2f} min, covariance: {cov_val:.6f}, correlation: {cor_val:.2f}')
+                lnx[0].set_data([event.xdata, event.xdata], [-1, 1])
+                lnx[0].set_linestyle('--')
+                lny[0].set_data([x[0], x[-1]], [cov_val, cov_val])
+                lny[0].set_linestyle('--')
+        else:
+            text.set_visible(False)
+            lnx[0].set_linestyle('None')
+            lny[0].set_linestyle('None')
+        fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("motion_notify_event", hover)
+
+    if not os.path.exists('images'):
+        os.mkdir('images')
+    plt.savefig(f"images/stocsy_from_{target}_{mode}.pdf", transparent=True, dpi=300)
+
+    html_str = mpld3.fig_to_html(fig)
+    with open(f"images/stocsy_interactive_{target}min_{mode}.html", "w") as f:
+        f.write(html_str)
+
+    plt.show()
+    return corr, covar
+
+
 # --------------------------------------------------------------------------
 #                    10) Data-Export
 # --------------------------------------------------------------------------
