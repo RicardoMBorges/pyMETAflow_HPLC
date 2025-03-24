@@ -686,6 +686,242 @@ def compare_normalization_plots(
     plt.show()
 
 
+import os
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+def integrate_area_html_all(aligned_df, peaks, output_folder="html_images", base_filename="integration_plot"):
+    """
+    Computes the area under the curve (AUC) for each sample in the given DataFrame within
+    specified retention time (RT) intervals defined in the peaks list. For each sample, an
+    interactive Plotly HTML plot is created that highlights the integration regions.
+    
+    Parameters
+    ----------
+    aligned_df : pd.DataFrame
+        DataFrame where the first column is "RT (min)" (retention time) and the remaining columns 
+        are the intensities for each sample.
+    peaks : list
+        List of retention time boundaries in the form 
+            [lower_rt1, upper_rt1, lower_rt2, upper_rt2, ...].
+        The length of peaks must be even.
+    output_folder : str, optional
+        Folder (inside the "images" directory) in which to save the HTML plots (default "html_images").
+    base_filename : str, optional
+        Base name for the output files. Each file will be named as 
+        "{base_filename}_{sample_name}.html" (default "integration_plot").
+    
+    Returns
+    -------
+    auc_df : pd.DataFrame
+        A DataFrame where rows are samples and columns are each integration region 
+        (e.g., "Region 1", "Region 2", ...) containing the corresponding AUC values.
+    """
+    # Check that peaks has an even number of elements.
+    if len(peaks) % 2 != 0:
+        raise ValueError("The peaks list must contain an even number of elements (pairs of lower and upper limits).")
+    
+    # Create the base output directory and subfolder for HTML plots.
+    base_output_dir = "images"
+    html_output_dir = os.path.join(base_output_dir, output_folder)
+    os.makedirs(html_output_dir, exist_ok=True)
+    
+    # Extract retention time (RT) from the first column and convert to numeric values
+    rt = pd.to_numeric(aligned_df.iloc[:, 0], errors='coerce').values
+    
+    sample_names = aligned_df.columns[1:]
+    num_regions = len(peaks) // 2
+    
+    # Prepare a dictionary to collect AUC values per sample and per region.
+    auc_data = {f"Region {i+1}": [] for i in range(num_regions)}
+    auc_data["Sample"] = []
+    
+    # Loop over each sample to compute integration and create a plot
+    for sample in sample_names:
+        intensities = pd.to_numeric(aligned_df[sample], errors='coerce').values
+        
+        # For storing region-specific AUC values for this sample.
+        sample_auc = []
+        
+        # Create the Plotly figure for this sample
+        fig = go.Figure()
+        
+        # Add the full spectrum trace for the sample
+        fig.add_trace(go.Scatter(
+            x=rt,
+            y=intensities,
+            mode='lines',
+            name=sample,
+            line=dict(color='black')
+        ))
+        
+        # Loop through each integration region (pair of limits)
+        for i in range(0, len(peaks), 2):
+            lower_rt = peaks[i]
+            upper_rt = peaks[i+1]
+            mask = (rt >= lower_rt) & (rt <= upper_rt)
+            if np.sum(mask) >= 2:
+                auc = np.trapz(intensities[mask], rt[mask])
+            else:
+                auc = 0  # or np.nan if preferred
+            sample_auc.append(auc)
+            
+            # Add trace for the integration region
+            fig.add_trace(go.Scatter(
+                x=rt[mask],
+                y=intensities[mask],
+                mode='lines',
+                name=f"Region {i//2 + 1}",
+                line=dict(color='skyblue'),
+                fill='tozeroy',
+                opacity=0.5
+            ))
+            
+            # Add vertical dashed lines for region boundaries
+            fig.add_shape(
+                type="line",
+                x0=lower_rt,
+                x1=lower_rt,
+                y0=min(intensities),
+                y1=max(intensities),
+                line=dict(color="red", dash="dash")
+            )
+            fig.add_shape(
+                type="line",
+                x0=upper_rt,
+                x1=upper_rt,
+                y0=min(intensities),
+                y1=max(intensities),
+                line=dict(color="red", dash="dash")
+            )
+        
+        # Store the sample name and its region-specific AUC values
+        auc_data["Sample"].append(sample)
+        for idx, auc_val in enumerate(sample_auc):
+            auc_data[f"Region {idx+1}"].append(auc_val)
+        
+        # Update layout for the current sample plot
+        fig.update_layout(
+            title=f"Integration Regions for Sample: {sample}",
+            xaxis_title="RT (min)",
+            yaxis_title="Intensity",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        )
+        
+        # Save the figure as an interactive HTML file in the designated folder
+        output_filename = f"{base_filename}_{sample}.html"
+        output_path = os.path.join(html_output_dir, output_filename)
+        fig.write_html(output_path)
+        print(f"Integration plot for sample '{sample}' saved as: {output_path}")
+    
+    # Create a DataFrame from the auc_data dictionary
+    auc_df = pd.DataFrame(auc_data).set_index("Sample")
+    
+    return auc_df
+
+
+
+import os
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+def plot_overlayed_chromatograms(aligned_df, peaks, output_filename="overlayed_chromatograms.html", output_folder="html_images_overlay"):
+    """
+    Creates an interactive Plotly HTML plot that overlays the chromatograms for all samples 
+    (with retention time in the first column and intensities in subsequent columns) and 
+    highlights the integration regions defined by the peaks list.
+    
+    Parameters
+    ----------
+    aligned_df : pd.DataFrame
+        DataFrame where the first column is "RT (min)" (retention time) and the remaining columns 
+        are the intensities for each sample.
+    peaks : list
+        List of retention time boundaries in the form 
+            [lower_rt1, upper_rt1, lower_rt2, upper_rt2, ...].
+        The length of peaks must be even.
+    output_filename : str, optional
+        Name of the output HTML file (default "overlayed_chromatograms.html").
+    output_folder : str, optional
+        Folder (inside the "images" directory) in which to save the HTML plot (default "html_images_overlay").
+    
+    Returns
+    -------
+    fig : plotly.graph_objects.Figure
+        The interactive Plotly figure with overlayed chromatograms and integrated regions.
+    """
+    # Check that peaks has an even number of elements.
+    if len(peaks) % 2 != 0:
+        raise ValueError("The peaks list must contain an even number of elements (pairs of lower and upper limits).")
+    
+    # Create the output directory for HTML plots
+    base_output_dir = "images"
+    html_output_dir = os.path.join(base_output_dir, output_folder)
+    os.makedirs(html_output_dir, exist_ok=True)
+    
+    # Extract retention time (RT) from the first column and convert to numeric values
+    rt = pd.to_numeric(aligned_df.iloc[:, 0], errors='coerce').values
+    
+    # Initialize the Plotly figure
+    fig = go.Figure()
+    
+    # Overlay each sample's chromatogram
+    sample_names = aligned_df.columns[1:]
+    for sample in sample_names:
+        intensities = pd.to_numeric(aligned_df[sample], errors='coerce').values
+        fig.add_trace(go.Scatter(
+            x=rt,
+            y=intensities,
+            mode='lines',
+            name=sample,
+            line=dict(width=1),
+            opacity=0.7
+        ))
+    
+    # Add shapes (shaded regions and vertical lines) for each integration region
+    num_regions = len(peaks) // 2
+    for i in range(num_regions):
+        lower_rt = peaks[2*i]
+        upper_rt = peaks[2*i + 1]
+        # Add a shaded region
+        fig.add_vrect(
+            x0=lower_rt, x1=upper_rt,
+            fillcolor="skyblue", opacity=0.3, line_width=0,
+            annotation_text=f"Region {i+1}", annotation_position="top left"
+        )
+        # Optionally, add vertical dashed lines at the boundaries
+        fig.add_shape(
+            type="line",
+            x0=lower_rt, x1=lower_rt,
+            y0=min(rt), y1=max(rt),
+            line=dict(color="red", dash="dash")
+        )
+        fig.add_shape(
+            type="line",
+            x0=upper_rt, x1=upper_rt,
+            y0=min(rt), y1=max(rt),
+            line=dict(color="red", dash="dash")
+        )
+    
+    # Update layout settings for a clear presentation
+    fig.update_layout(
+        title="Overlayed Chromatograms with Integration Regions",
+        xaxis_title="RT (min)",
+        yaxis_title="Intensity",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    
+    # Save the interactive plot as an HTML file in the designated folder
+    output_path = os.path.join(html_output_dir, output_filename)
+    fig.write_html(output_path)
+    print(f"Overlayed chromatograms plot saved as: {output_path}")
+    
+    return fig
+
+
+
 # --------------------------------------------------------------------------
 #               3) DATA REFERENCING & ALIGNMENT FUNCTIONS
 # --------------------------------------------------------------------------
