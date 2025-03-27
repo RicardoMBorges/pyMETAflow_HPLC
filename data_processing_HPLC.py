@@ -691,7 +691,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-def integrate_area_html_all(aligned_df, peaks, output_folder="html_images", base_filename="integration_plot"):
+def integrate_area_html_all(aligned_df, peaks, output_folder="images", base_filename="integration_plot"):
     """
     Computes the area under the curve (AUC) for each sample in the given DataFrame within
     specified retention time (RT) intervals defined in the peaks list. For each sample, an
@@ -827,7 +827,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
-def plot_overlayed_chromatograms(aligned_df, peaks, output_filename="overlayed_chromatograms.html", output_folder="html_images_overlay"):
+def plot_overlayed_chromatograms(aligned_df, peaks, output_filename="overlayed_chromatograms.html", output_folder="images"):
     """
     Creates an interactive Plotly HTML plot that overlays the chromatograms for all samples 
     (with retention time in the first column and intensities in subsequent columns) and 
@@ -857,8 +857,9 @@ def plot_overlayed_chromatograms(aligned_df, peaks, output_filename="overlayed_c
         raise ValueError("The peaks list must contain an even number of elements (pairs of lower and upper limits).")
     
     # Create the output directory for HTML plots
-    base_output_dir = "images"
+#    base_output_dir = "images"
     html_output_dir = os.path.join(base_output_dir, output_folder)
+    html_output_dir = os.path.join(output_folder)
     os.makedirs(html_output_dir, exist_ok=True)
     
     # Extract retention time (RT) from the first column and convert to numeric values
@@ -920,6 +921,56 @@ def plot_overlayed_chromatograms(aligned_df, peaks, output_filename="overlayed_c
     
     return fig
 
+import os
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+def plot_boxplots_by_class(
+    auc_df, 
+    df_metadata, 
+    classification_column='ATTRIBUTE_classification',
+    output_folder='plots', 
+    filename='boxplot_auc_by_class.png',
+    show_plot=True
+):
+    """
+    Plots and saves boxplots for each integration region in the AUC DataFrame, grouped by sample classification.
+    
+    Parameters:
+    - auc_df: DataFrame with index as sample names and columns as region names (e.g., Region 1, Region 2).
+    - df_metadata: DataFrame with metadata including sample classifications.
+    - classification_column: Column name in df_metadata used for grouping samples.
+    - output_folder: Folder to save the plot.
+    - filename: Filename for the saved plot.
+    - show_plot: If True, displays the plot inline.
+    """
+    # Ensure output folder exists
+    os.makedirs(output_folder, exist_ok=True)
+    save_path = os.path.join(output_folder, filename)
+
+    # Prepare data
+    auc_df = auc_df.copy()
+    auc_df['Samples'] = auc_df.index
+    merged_df = pd.merge(auc_df, df_metadata[['Samples', classification_column]], on='Samples')
+    melted_df = merged_df.melt(id_vars=[classification_column], 
+                               value_vars=[col for col in auc_df.columns if col != 'Samples'],
+                               var_name='Region', value_name='AUC')
+
+    # Plot
+    sns.set(style="whitegrid")
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(x='Region', y='AUC', hue=classification_column, data=melted_df)
+    plt.title('AUC by Region grouped by Sample Classification')
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    
+    # Save
+    plt.savefig(save_path, dpi=300)
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
 
 
 # --------------------------------------------------------------------------
@@ -2915,7 +2966,7 @@ def plot_hca_heatmap(
 # --------------------------------------------------------------------------
 #               9) STOCSY FUNCTIONS
 # --------------------------------------------------------------------------
-def STOCSY(target, X, rt_values):
+def STOCSY_LC(target, X, rt_values):
     import mpld3
     import math
     from matplotlib.collections import LineCollection
@@ -2972,9 +3023,9 @@ def STOCSY(target, X, rt_values):
             currenttick += 1
     plt.xticks(ticksx, tickslabels, fontsize=12)
     
-    axs.set_xlabel('ppm', fontsize=14)
-    axs.set_ylabel(f"Covariance with \n signal at {target:.2f} ppm", fontsize=14)
-    axs.set_title(f'STOCSY from signal at {target:.2f} ppm', fontsize=16)
+    axs.set_xlabel('Retention time (ppm)', fontsize=14)
+    axs.set_ylabel(f"Covariance with \n signal at {target:.2f} min", fontsize=14)
+    axs.set_title(f'STOCSY from signal at {target:.2f} min', fontsize=16)
     
     text = axs.text(1, 1, '')
     lnx = plt.plot([60, 60], [0, 1.5], color='black', linewidth=0.3)
@@ -3008,7 +3059,7 @@ def STOCSY(target, X, rt_values):
     
     if not os.path.exists('images'):
         os.mkdir('images')
-    plt.savefig(f"images/stocsy_from_{target}.pdf", transparent=True, dpi=300)
+    plt.savefig(f"images/stocsy_from_{target}min.pdf", transparent=True, dpi=300)
     
     html_str = mpld3.fig_to_html(fig)
     with open(f"images/stocsy_interactive_{target}min.html", "w") as f:
@@ -3050,7 +3101,7 @@ def STOCSY_interactive(target, X, min):
     fig.show()
     return corr, covar
 
-def STOCSY_mode(target, X, rt_values, mode="linear"):
+def STOCSY_LC_mode(target, X, rt_values, mode="linear"):
     """
     Structured STOCSY: Compute correlation and covariance between a target signal and a matrix of signals.
     
@@ -3119,24 +3170,50 @@ def STOCSY_mode(target, X, rt_values, mode="linear"):
                 r = np.corrcoef(y, fitted)[0, 1]
 
             elif mode == "sinusoidal":
-                guess_freq = 1 / (2 * np.pi)
-                popt, _ = curve_fit(sin_model, x, y, p0=[1, guess_freq, 0, 0], maxfev=10000)
-                fitted = sin_model(x, *popt)
-                r = np.corrcoef(y, fitted)[0, 1]
+                if np.std(y) < 1e-6:
+                    r = 0
+                else:
+                    # Estimar frequência dominante via FFT
+                    y_detrended = y - np.mean(y)
+                    fft = np.fft.fft(y_detrended)
+                    freqs = np.fft.fftfreq(len(x), d=(x[1] - x[0]))
+                    dom_freq_index = np.argmax(np.abs(fft[1:])) + 1  # ignorar frequência 0
+                    dom_freq = np.abs(freqs[dom_freq_index])
+                    guess_freq = 2 * np.pi * dom_freq if dom_freq > 0 else 1 / (2 * np.pi)
+
+                    # Ajuste do modelo senoidal
+                    popt, _ = curve_fit(sin_model, x, y, p0=[1, guess_freq, 0, 0], maxfev=10000)
+                    fitted = sin_model(x, *popt)
+                    r = np.corrcoef(y, fitted)[0, 1]
+
+
 
             elif mode == "sigmoid":
-                x_scaled = (x - np.min(x)) / (np.max(x) - np.min(x))
-                y_scaled = (y - np.min(y)) / (np.max(y) - np.min(y))
-                popt, _ = curve_fit(sigmoid_model, x_scaled, y_scaled, p0=[1, 1, 0.5], maxfev=10000)
-                fitted = sigmoid_model(x_scaled, *popt)
-                r = np.corrcoef(y_scaled, fitted)[0, 1]
+                if np.max(x) - np.min(x) == 0 or np.max(y) - np.min(y) == 0:
+                    r = 0
+                else:
+                    x_scaled = (x - np.min(x)) / (np.max(x) - np.min(x))
+                    y_scaled = (y - np.min(y)) / (np.max(y) - np.min(y))
+                    popt, _ = curve_fit(sigmoid_model, x_scaled, y_scaled, p0=[1, 1, 0.5], maxfev=10000)
+                    fitted = sigmoid_model(x_scaled, *popt)
+                    fitted_unscaled = fitted * (np.max(y) - np.min(y)) + np.min(y)
+                    r = np.corrcoef(y, fitted_unscaled)[0, 1]
+
 
             elif mode == "gaussian":
                 mu_init = x[np.argmax(y)]
-                sigma_init = np.std(x)
+                half_max = np.max(y) / 2
+                indices = np.where(y > half_max)[0]
+
+                if len(indices) > 1:
+                    sigma_init = (x[indices[-1]] - x[indices[0]]) / 2.355  # FWHM ≈ 2.355σ
+                else:
+                    sigma_init = np.std(x)
+
                 popt, _ = curve_fit(gauss_model, x, y, p0=[1, mu_init, sigma_init, 0], maxfev=10000)
                 fitted = gauss_model(x, *popt)
                 r = np.corrcoef(y, fitted)[0, 1]
+
 
             else:
                 raise ValueError("Invalid mode")
@@ -3188,9 +3265,9 @@ def STOCSY_mode(target, X, rt_values, mode="linear"):
             currenttick += 1
     plt.xticks(ticksx, tickslabels, fontsize=12)
 
-    axs.set_xlabel('ppm', fontsize=14)
-    axs.set_ylabel(f"Covariance with \n signal at {target:.2f} ppm", fontsize=14)
-    axs.set_title(f'STOCSY from signal at {target:.2f} ppm ({mode} model)', fontsize=16)
+    axs.set_xlabel('Retention time (ppm)', fontsize=14)
+    axs.set_ylabel(f"Covariance with \n signal at {target:.2f} min", fontsize=14)
+    axs.set_title(f'STOCSY from signal at {target:.2f} min ({mode} model)', fontsize=16)
 
     text = axs.text(1, 1, '')
     lnx = plt.plot([60, 60], [0, 1.5], color='black', linewidth=0.3)
@@ -3225,7 +3302,7 @@ def STOCSY_mode(target, X, rt_values, mode="linear"):
 
     if not os.path.exists('images'):
         os.mkdir('images')
-    plt.savefig(f"images/stocsy_from_{target}_{mode}.pdf", transparent=True, dpi=300)
+    plt.savefig(f"images/stocsy_from_{target}min_{mode}.pdf", transparent=True, dpi=300)
 
     html_str = mpld3.fig_to_html(fig)
     with open(f"images/stocsy_interactive_{target}min_{mode}.html", "w") as f:
@@ -3233,7 +3310,6 @@ def STOCSY_mode(target, X, rt_values, mode="linear"):
 
     plt.show()
     return corr, covar
-
 
 # --------------------------------------------------------------------------
 #                    10) Data-Export
