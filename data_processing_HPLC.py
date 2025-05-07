@@ -145,6 +145,76 @@ def combine_csv_files(data_folder, output_csv=None):
     
     return combined_df
 
+import os
+import pandas as pd
+
+def extract_rt_and_wavelength_fixed(input_file, target_wavelength):
+    with open(input_file, 'r', encoding='latin1') as file:
+        lines = file.readlines()
+
+    header_idx = next((i for i, line in enumerate(lines) if "R.Time (min)" in line), None)
+    if header_idx is None:
+        raise ValueError("Header with 'R.Time (min)' not found.")
+
+    for i in range(header_idx + 1, len(lines)):
+        parts = lines[i].strip().split('\t')[1:]
+        if all(p.strip().isdigit() for p in parts):
+            wl_idx = i
+            break
+    else:
+        raise ValueError("No numeric wavelength row found.")
+
+    wavelengths = [int(w) / 100 for w in lines[wl_idx].strip().split('\t')[1:]]
+    col_index = min(range(len(wavelengths)), key=lambda i: abs(wavelengths[i] - target_wavelength))
+    selected_wavelength = round(wavelengths[col_index], 2)
+
+    data = []
+    for line in lines[wl_idx + 1:]:
+        parts = line.strip().split('\t')
+        if len(parts) <= col_index + 1:
+            continue
+        try:
+            rt = float(parts[0].replace(',', '.'))
+            intensity = float(parts[col_index + 1].replace(',', '.'))
+            data.append((rt, intensity))
+        except ValueError:
+            continue
+
+    df = pd.DataFrame(data, columns=['RT(min)', f'Intensity_{selected_wavelength}nm'])
+    return df
+
+def import_3D_data(input_folder, target_wavelength=254.0, output_filename='combined_wavelength_data.csv'):
+    combined_df = None
+
+    # Cria subpasta 'data'
+    output_folder = os.path.join(input_folder, 'data')
+    os.makedirs(output_folder, exist_ok=True)
+
+    for filename in os.listdir(input_folder):
+        if filename.lower().endswith('.txt'):
+            file_path = os.path.join(input_folder, filename)
+            try:
+                df = extract_rt_and_wavelength_fixed(file_path, target_wavelength)
+                df.rename(columns={df.columns[1]: os.path.splitext(filename)[0]}, inplace=True)
+                if combined_df is None:
+                    combined_df = df
+                else:
+                    combined_df = pd.merge(combined_df, df, on='RT(min)', how='outer')
+            except Exception as e:
+                print(f"❌ Error processing {filename}: {e}")
+
+    if combined_df is not None:
+        combined_df.sort_values(by='RT(min)', inplace=True)
+        combined_df.reset_index(drop=True, inplace=True)
+        output_path = os.path.join(output_folder, output_filename)
+        combined_df.to_csv(output_path, index=False)
+        print(f"✅ Combined file saved to: {output_path}")
+    else:
+        print("⚠️ No data combined.")
+
+    return combined_df
+
+
 ### Remove ends          
 def filter_rt_range(data, start_rt, end_rt, axis_column=None):
     """
@@ -267,6 +337,7 @@ def create_chromatogram_plot(dataframe,
     
 import os
 import plotly.graph_objects as go
+import pandas as pd
 
 def create_stacked_chromatogram_plot(dataframe, 
                                      x_axis_col='RT(min)', 
@@ -302,14 +373,25 @@ def create_stacked_chromatogram_plot(dataframe,
     """
     fig = go.Figure()
     
+    plotted_columns = 0  # Track how many valid traces are plotted
+    
     # Iterate over the specified sample columns, offsetting each trace by gap * index.
     for i, column in enumerate(dataframe.columns[start_column:end_column + 1]):
-        fig.add_trace(go.Scatter(
-            x=dataframe[x_axis_col],
-            y=dataframe[column] + i * gap,
-            mode='lines',
-            name=column
-        ))
+        # Check if column is numeric
+        if pd.api.types.is_numeric_dtype(dataframe[column]):
+            fig.add_trace(go.Scatter(
+                x=dataframe[x_axis_col],
+                y=dataframe[column] + plotted_columns * gap,
+                mode='lines',
+                name=column
+            ))
+            plotted_columns += 1  # Increment only if we plotted
+        else:
+            print(f"⚠️ Skipping non-numeric column: {column}")
+
+    if plotted_columns == 0:
+        print("❌ No numeric columns found to plot. Check your dataframe.")
+        return
     
     # Update the figure layout
     fig.update_layout(
@@ -324,7 +406,7 @@ def create_stacked_chromatogram_plot(dataframe,
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, output_file)
     fig.write_html(output_path)
-    print(f"Plot saved as: {output_path}")
+    print(f"✅ Plot saved as: {output_path}")
     
     # Optionally display the figure
     if show_fig:
@@ -858,7 +940,6 @@ def plot_overlayed_chromatograms(aligned_df, peaks, output_filename="overlayed_c
     
     # Create the output directory for HTML plots
 #    base_output_dir = "images"
-    html_output_dir = os.path.join(base_output_dir, output_folder)
     html_output_dir = os.path.join(output_folder)
     os.makedirs(html_output_dir, exist_ok=True)
     
@@ -972,7 +1053,205 @@ def plot_boxplots_by_class(
     else:
         plt.close()
 
+import plotly.graph_objs as go
 
+def import_uv_matrix(input_file, wavelength_min=210, wavelength_max=400, verbose=False):
+    """
+    Imports the full UV matrix from a PDA 3D .txt exported by Shimadzu software.
+    Filters the wavelengths to a specified range (default 210–400 nm).
+
+    Parameters:
+        input_file (str): Path to the text file.
+        wavelength_min (float): Minimum wavelength to keep (default 210 nm).
+        wavelength_max (float): Maximum wavelength to keep (default 400 nm).
+        verbose (bool): Print warnings and info.
+
+    Returns:
+        - rt_values: array of retention times (RT)
+        - wavelengths: array of wavelengths (nm) AFTER filtering
+        - matrix_df: DataFrame (rows = RT, columns = wavelengths)
+    """
+    with open(input_file, 'r', encoding='latin1') as file:
+        lines = file.readlines()
+
+    # Find index of the line with 'R.Time (min)'
+    header_idx = next((i for i, line in enumerate(lines) if "R.Time (min)" in line), None)
+    if header_idx is None:
+        raise ValueError("Header with 'R.Time (min)' not found.")
+
+    # Find the wavelength header line
+    for i in range(header_idx + 1, len(lines)):
+        parts = lines[i].strip().split('\t')[1:]
+        if all(p.strip().isdigit() for p in parts):
+            wl_idx = i
+            break
+    else:
+        raise ValueError("No numeric wavelength row found after header.")
+
+    # Get wavelengths (convert to float nm)
+    wavelengths_all = [int(w) / 100 for w in lines[wl_idx].strip().split('\t')[1:]]
+
+    # Figure out which columns to keep
+    keep_indices = [i for i, wl in enumerate(wavelengths_all) if wavelength_min <= wl <= wavelength_max]
+    filtered_wavelengths = [wavelengths_all[i] for i in keep_indices]
+
+    if verbose:
+        print(f"Original wavelengths: {len(wavelengths_all)} → Filtered to {len(filtered_wavelengths)} between {wavelength_min}-{wavelength_max} nm.")
+
+    # Read the matrix (starting from wl_idx + 1)
+    rt_values = []
+    data_matrix = []
+    for line_num, line in enumerate(lines[wl_idx + 1:], start=wl_idx + 2):
+        parts = line.strip().split('\t')
+        if len(parts) < 2:
+            continue  # skip empty lines
+        try:
+            rt = float(parts[0].replace(',', '.'))
+            intensities_raw = parts[1:]
+            if len(intensities_raw) < len(wavelengths_all):
+                if verbose:
+                    print(f"⚠️ Skipping incomplete line {line_num}: {len(intensities_raw)} values, expected {len(wavelengths_all)}")
+                continue  # skip incomplete lines
+            if len(intensities_raw) > len(wavelengths_all):
+                if verbose:
+                    print(f"⚠️ Line {line_num}: Extra columns detected ({len(intensities_raw)} values). Truncating to {len(wavelengths_all)}.")
+            # Truncate if too many columns, then filter the desired range
+            full_intensities = [float(x.replace(',', '.')) for x in intensities_raw[:len(wavelengths_all)]]
+            filtered_intensities = [full_intensities[i] for i in keep_indices]
+            rt_values.append(rt)
+            data_matrix.append(filtered_intensities)
+        except ValueError:
+            if verbose:
+                print(f"⚠️ Skipping invalid numeric data at line {line_num}.")
+            continue
+
+    # Create DataFrame: rows = RT(min), columns = wavelengths (nm)
+    matrix_df = pd.DataFrame(data_matrix, columns=[f"{wl:.2f}nm" for wl in filtered_wavelengths])
+    matrix_df.insert(0, 'RT(min)', rt_values)
+
+    return rt_values, filtered_wavelengths, matrix_df
+
+
+def view_uv_spectrum_at_rt_interactive(matrix_df, target_rt, output_html="uv_spectrum.html", tolerance=0.05):
+    """
+    Selects the closest RT to the target_rt and saves an interactive UV spectrum plot as HTML.
+    
+    Parameters:
+        matrix_df (DataFrame): DataFrame containing the UV matrix (RT(min) + wavelengths as columns).
+        target_rt (float): The retention time to find the closest match.
+        output_html (str): Filename for the saved HTML plot.
+        tolerance (float): Max allowed difference between found RT and target_rt. Prints warning if larger.
+
+    Returns:
+        wavelengths (list): List of wavelengths (floats).
+        intensities (list): List of intensities for the closest RT.
+        rt_found (float): The RT(min) that was actually used.
+    """
+    # Find the closest row to the target_rt
+    closest_idx = (matrix_df['RT(min)'] - target_rt).abs().idxmin()
+    row = matrix_df.iloc[closest_idx]
+    rt_found = row['RT(min)']
+    
+    # Warn if too far from target
+    if abs(rt_found - target_rt) > tolerance:
+        print(f"⚠️ Closest RT is {rt_found:.4f} min (difference: {abs(rt_found - target_rt):.4f} min)")
+    
+    # Extract wavelengths and intensities
+    wavelengths = [float(col.replace('nm', '')) for col in matrix_df.columns if 'nm' in col]
+    intensities = row[1:].values  # skip the 'RT(min)' column
+
+    # Create interactive plot
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=wavelengths,
+        y=intensities,
+        mode='lines+markers',
+        hovertemplate='Wavelength: %{x} nm<br>Intensity: %{y:.2f}<extra></extra>',
+        name=f'Spectrum at {rt_found:.2f} min'
+    ))
+
+    fig.update_layout(
+        title=f"UV Spectrum at RT = {rt_found:.2f} min",
+        xaxis_title="Wavelength (nm)",
+        yaxis_title="Intensity",
+        hovermode="x unified"
+    )
+
+    # Save as HTML
+    fig.write_html(output_html)
+    print(f"✅ Interactive plot saved as: {output_html}")
+
+    return wavelengths, intensities, rt_found
+
+import numpy as np
+import plotly.graph_objects as go
+
+def plot_uv_contour(
+    matrix_df,
+    output_html="uv_contour_plot.html",
+    intensity_transform="none"  # Options: 'none', 'log', 'minmax', 'normalize', ('custom', func)
+):
+    """
+    Plots a contour plot of the UV matrix and saves as an interactive HTML file.
+
+    Parameters:
+    - matrix_df: DataFrame with 'RT(min)' as first column and wavelengths as the other columns.
+    - output_html: Filename for the saved HTML plot.
+    - intensity_transform: How to process intensities before plotting.
+        Options:
+            'none'      = raw data
+            'log'       = np.log1p(intensity)
+            'minmax'    = (X - X.min()) / (X.max() - X.min())
+            'normalize' = each wavelength normalized to its max
+            ('custom', func) = a tuple with a custom function applied elementwise
+    """
+    # Extract axes and data
+    rt_values = matrix_df.iloc[:, 0].values
+    wavelengths = [float(col.replace("nm", "")) for col in matrix_df.columns[1:]]
+    intensity_matrix = matrix_df.iloc[:, 1:].values.T  # Transpose (wavelengths x rt)
+
+    # Apply intensity transformation
+    if intensity_transform == "log":
+        print("⚙️ Applying log transformation (log1p)...")
+        intensity_matrix = np.log1p(intensity_matrix)
+    elif intensity_transform == "minmax":
+        print("⚙️ Applying min-max scaling...")
+        min_val, max_val = np.min(intensity_matrix), np.max(intensity_matrix)
+        intensity_matrix = (intensity_matrix - min_val) / (max_val - min_val)
+    elif intensity_transform == "normalize":
+        print("⚙️ Normalizing each wavelength (row)...")
+        row_max = np.max(intensity_matrix, axis=1, keepdims=True)
+        row_max[row_max == 0] = 1  # avoid division by zero
+        intensity_matrix = intensity_matrix / row_max
+    elif isinstance(intensity_transform, tuple) and intensity_transform[0] == "custom":
+        func = intensity_transform[1]
+        print("⚙️ Applying custom transformation...")
+        intensity_matrix = func(intensity_matrix)
+    else:
+        print("⚙️ Using raw intensities.")
+
+    # Create contour plot
+    fig = go.Figure(data=go.Contour(
+        z=intensity_matrix,
+        x=rt_values,
+        y=wavelengths,
+        colorscale='Viridis',
+        contours=dict(showlabels=True),
+        colorbar=dict(title='Intensity')
+    ))
+
+    fig.update_layout(
+        title="UV Matrix Contour Plot",
+        xaxis_title="Retention Time (min)",
+        yaxis_title="Wavelength (nm)",
+        template="plotly_white"
+    )
+
+    # Save as HTML
+    fig.write_html(output_html)
+    print(f"✅ Contour plot saved as: {output_html}")
+
+        
 # --------------------------------------------------------------------------
 #               3) DATA REFERENCING & ALIGNMENT FUNCTIONS
 # --------------------------------------------------------------------------
@@ -980,7 +1259,7 @@ import pandas as pd
 import numpy as np
 from pyicoshift import Icoshift
 
-def ref_spectra_to_df(df, thresh=0.01, offsetppm=None, interactive=True, testThreshold=False, xlim=(-0.7, 0.7)):
+def ref_spectra_to_df(df, thresh=0.01, offsetppm=None, target_position=0.0, interactive=True, testThreshold=False, xlim=(-0.7, 0.7)):
     axis_col = "RT(min)"
     if df.columns[0] != axis_col:
         raise ValueError(f"The first column must be named '{axis_col}'")
@@ -1038,7 +1317,7 @@ def ref_spectra_to_df(df, thresh=0.01, offsetppm=None, interactive=True, testThr
                 idx = np.argmax(heights)
                 offset1 = ppm_orig[candidate_peaks][idx]
     offsets[sample1] = offset1
-    new_axis = ppm_orig - offset1
+    new_axis = ppm_orig - offset1 + target_position
     ref_intensity = {}
     for sample in sample_cols:
         intensity = df[sample].values
@@ -1049,10 +1328,10 @@ def ref_spectra_to_df(df, thresh=0.01, offsetppm=None, interactive=True, testThr
             offset_i = 0.0
         else:
             candidate_ppms = ppm_orig[peaks]
-            idx = np.argmin(np.abs(candidate_ppms))
+            idx = np.argmin(np.abs(candidate_ppms - offset1))
             offset_i = candidate_ppms[idx]
         offsets[sample] = offset_i
-        shifted_axis = ppm_orig - offset_i
+        shifted_axis = ppm_orig - offset_i + target_position
         intensity_interp = np.interp(new_axis, shifted_axis, intensity)
         ref_intensity[sample] = intensity_interp
         print(f"Sample '{sample}' referenced using offset {offset_i:.4f} ppm.")
@@ -3103,30 +3382,34 @@ def STOCSY_interactive(target, X, min):
 
 def STOCSY_LC_mode(target, X, rt_values, mode="linear"):
     """
-    Structured STOCSY: Compute correlation and covariance between a target signal and a matrix of signals.
+    Structured STOCSY: Compute correlation (or similarity), R², and RMSE between a target signal and a matrix of signals.
     
     Parameters:
     ----------
     target : float or Series
-        Target retention time or signal vector for STOCSY anchor.
+        Target retention time (if float) or signal vector for STOCSY anchor.
     X : DataFrame
         Data matrix where each row is a signal (e.g., from LC-MS).
     rt_values : Series
         Retention time values corresponding to each row in X.
     mode : str, optional
         Type of structured correlation model to use:
-            - 'linear'      : Standard Pearson correlation (default).
-            - 'exponential' : Fit exponential decay model.
-            - 'sinusoidal'  : Fit sine wave relationship. Circadian cycles, time dependent analysis.
-            - 'sigmoid'     : Fit logistic dose-response model. Biological activity vs. concentration; saturation effects, enzyme kinetics. Captures thresholds and plateaus (nonlinear dose-response).
-            - 'gaussian'    : Fit bell-shaped relationship. Peak-shaped relationships (e.g. chromatographic peaks, transient events).
+            - 'linear'       : Pearson correlation (default).
+            - 'exponential'  : Exponential decay (kinetics, degradation).
+            - 'sinusoidal'   : Sine wave (circadian rhythms, periodicity; uses FFT to estimate frequency).
+            - 'sigmoid'      : Logistic dose-response (biological saturation, enzyme kinetics; captures thresholds and plateaus).
+            - 'gaussian'     : Symmetric bell curve (chromatographic peaks, transient events).
+            - 'fft'          : Frequency domain similarity (hidden periodic structure, using cosine similarity of FFT magnitudes).
+            - 'polynomial'   : 2nd-degree polynomial trend (curvilinear responses).
+            - 'piecewise'    : Piecewise linear (threshold, on/off behavior).
+            - 'skewed_gauss' : Asymmetric bell-shaped peak (real-world chromatographic peaks).
     
     Returns:
     -------
     corr : array
-        Correlation values between target and each signal.
+        Array of correlation (or similarity) values between the target and each signal.
     covar : array
-        Covariance values between target and each signal.
+        Array of covariance values between the target and each signal.
     """
     import os
     import mpld3
@@ -3136,7 +3419,11 @@ def STOCSY_LC_mode(target, X, rt_values, mode="linear"):
     from matplotlib.collections import LineCollection
     from scipy import stats
     from scipy.optimize import curve_fit
+    from scipy.spatial.distance import cosine
+    from scipy.fft import fft
+    from scipy.stats import skewnorm
 
+    # Define models
     def exp_model(x, a, b, c):
         return a * np.exp(-b * x) + c
 
@@ -3149,20 +3436,41 @@ def STOCSY_LC_mode(target, X, rt_values, mode="linear"):
     def gauss_model(x, a, mu, sigma, c):
         return a * np.exp(-(x - mu)**2 / (2 * sigma**2)) + c
 
+    def poly_model(x, a0, a1, a2):
+        return a0 + a1 * x + a2 * x**2
+
+    def piecewise_model(x, x0, k1, b1, k2, b2):
+        return np.piecewise(x, [x < x0, x >= x0],
+                            [lambda x: k1 * x + b1, lambda x: k2 * x + b2])
+    
+    def skewed_gauss_model(x, a, loc, scale, alpha, offset):
+        # skewnorm.pdf returns density; multiplicative factor a and offset applied.
+        return a * skewnorm.pdf(x, alpha, loc, scale) + offset
+
+    def fft_magnitude(signal):
+        return np.abs(fft(signal))
+
+    # Determine target vector
     if isinstance(target, float):
         idx = np.abs(rt_values - target).idxmin()
         target_vect = X.iloc[idx]
     else:
         target_vect = target
 
-    corr = []
+    corr_list = []
+    r2_list = []
+    rmse_list = []
+    target_vals = target_vect.values
 
+    # Loop por cada sinal em X
     for i in range(X.shape[0]):
-        x = target_vect.values
         y = X.iloc[i].values
+        x = target_vals  # usamos o mesmo vetor de x do sinal target
+
         try:
             if mode == "linear":
                 r = np.corrcoef(x, y)[0, 1]
+                fitted = y
 
             elif mode == "exponential":
                 popt, _ = curve_fit(exp_model, x, y, maxfev=10000)
@@ -3171,80 +3479,102 @@ def STOCSY_LC_mode(target, X, rt_values, mode="linear"):
 
             elif mode == "sinusoidal":
                 if np.std(y) < 1e-6:
-                    r = 0
-                else:
-                    # Estimar frequência dominante via FFT
-                    y_detrended = y - np.mean(y)
-                    fft = np.fft.fft(y_detrended)
-                    freqs = np.fft.fftfreq(len(x), d=(x[1] - x[0]))
-                    dom_freq_index = np.argmax(np.abs(fft[1:])) + 1  # ignorar frequência 0
-                    dom_freq = np.abs(freqs[dom_freq_index])
-                    guess_freq = 2 * np.pi * dom_freq if dom_freq > 0 else 1 / (2 * np.pi)
-
-                    # Ajuste do modelo senoidal
-                    popt, _ = curve_fit(sin_model, x, y, p0=[1, guess_freq, 0, 0], maxfev=10000)
-                    fitted = sin_model(x, *popt)
-                    r = np.corrcoef(y, fitted)[0, 1]
-
-
+                    raise ValueError("Low signal variance")
+                # Remover tendência e estimar frequência dominante via FFT
+                y_detrended = y - np.mean(y)
+                fft_y = fft(y_detrended)
+                freqs = np.fft.fftfreq(len(x), d=(x[1] - x[0]))
+                # Ignorar a frequência 0
+                dom_freq_index = np.argmax(np.abs(fft_y[1:])) + 1
+                dom_freq = np.abs(freqs[dom_freq_index])
+                guess_freq = 2 * np.pi * dom_freq if dom_freq > 0 else 1 / (2 * np.pi)
+                popt, _ = curve_fit(sin_model, x, y, p0=[1, guess_freq, 0, 0], maxfev=10000)
+                fitted = sin_model(x, *popt)
+                r = np.corrcoef(y, fitted)[0, 1]
 
             elif mode == "sigmoid":
                 if np.max(x) - np.min(x) == 0 or np.max(y) - np.min(y) == 0:
-                    r = 0
-                else:
-                    x_scaled = (x - np.min(x)) / (np.max(x) - np.min(x))
-                    y_scaled = (y - np.min(y)) / (np.max(y) - np.min(y))
-                    popt, _ = curve_fit(sigmoid_model, x_scaled, y_scaled, p0=[1, 1, 0.5], maxfev=10000)
-                    fitted = sigmoid_model(x_scaled, *popt)
-                    fitted_unscaled = fitted * (np.max(y) - np.min(y)) + np.min(y)
-                    r = np.corrcoef(y, fitted_unscaled)[0, 1]
-
+                    raise ValueError("Flat signal")
+                x_scaled = (x - np.min(x)) / (np.max(x) - np.min(x))
+                y_scaled = (y - np.min(y)) / (np.max(y) - np.min(y))
+                popt, _ = curve_fit(sigmoid_model, x_scaled, y_scaled, p0=[1, 1, 0.5], maxfev=10000)
+                fitted_scaled = sigmoid_model(x_scaled, *popt)
+                fitted = fitted_scaled * (np.max(y) - np.min(y)) + np.min(y)
+                r = np.corrcoef(y, fitted)[0, 1]
 
             elif mode == "gaussian":
                 mu_init = x[np.argmax(y)]
                 half_max = np.max(y) / 2
                 indices = np.where(y > half_max)[0]
-
                 if len(indices) > 1:
-                    sigma_init = (x[indices[-1]] - x[indices[0]]) / 2.355  # FWHM ≈ 2.355σ
+                    sigma_init = (x[indices[-1]] - x[indices[0]]) / 2.355  # FWHM ~2.355σ
                 else:
                     sigma_init = np.std(x)
-
                 popt, _ = curve_fit(gauss_model, x, y, p0=[1, mu_init, sigma_init, 0], maxfev=10000)
                 fitted = gauss_model(x, *popt)
                 r = np.corrcoef(y, fitted)[0, 1]
 
+            elif mode == "fft":
+                # Compute FFT magnitudes and compare via cosine similarity
+                target_fft = fft_magnitude(target_vals)
+                y_fft = fft_magnitude(y)
+                similarity = 1 - cosine(target_fft, y_fft)
+                r = similarity
+                fitted = np.zeros_like(y)  # Não há ajuste, apenas similaridade
+
+            elif mode == "polynomial":
+                popt, _ = curve_fit(poly_model, x, y, p0=[0, 1, 0], maxfev=10000)
+                fitted = poly_model(x, *popt)
+                r = np.corrcoef(y, fitted)[0, 1]
+
+            elif mode == "piecewise":
+                # Estimativa inicial: ponto de mudança no meio do domínio
+                x0_guess = np.median(x)
+                popt, _ = curve_fit(piecewise_model, x, y, p0=[x0_guess, 1, 0, 0.5, 0], maxfev=10000)
+                fitted = piecewise_model(x, *popt)
+                r = np.corrcoef(y, fitted)[0, 1]
+
+            elif mode == "skewed_gauss":
+                loc_init = x[np.argmax(y)]
+                scale_init = np.std(x)
+                popt, _ = curve_fit(skewed_gauss_model, x, y, p0=[1, loc_init, scale_init, 4, 0], maxfev=10000)
+                fitted = skewed_gauss_model(x, *popt)
+                r = np.corrcoef(y, fitted)[0, 1]
 
             else:
                 raise ValueError("Invalid mode")
-
         except Exception:
-            r = 0  # Fallback in case of fitting errors
+            r = 0
+            fitted = np.zeros_like(y)
 
-        corr.append(r)
+        r2 = r ** 2
+        rmse = np.sqrt(np.mean((y - fitted) ** 2)) if mode != "fft" else np.nan
+        corr_list.append(r)
+        r2_list.append(r2)
+        rmse_list.append(rmse)
 
-    corr = np.array(corr)
+    corr = np.array(corr_list)
     covar = (target_vect - target_vect.mean()) @ (X.T - np.tile(X.T.mean(), (X.T.shape[0], 1))) / (X.T.shape[0] - 1)
 
-    # Plotting (unchanged, includes reversed x-axis)
-    x = np.linspace(0, len(covar), len(covar))
-    y = covar
-    points = np.array([x, y]).T.reshape(-1, 1, 2)
+    # Plotting dos resultados (mantido igual, com eixo X invertido)
+    x_plot = np.linspace(0, len(covar), len(covar))
+    y_plot = covar
+    points = np.array([x_plot, y_plot]).T.reshape(-1, 1, 2)
     segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
-    fig, axs = plt.subplots(1, 1, figsize=(16, 4), sharex=True, sharey=True)
+    fig, ax = plt.subplots(1, 1, figsize=(16, 4), sharex=True, sharey=True)
     norm = plt.Normalize(corr.min(), corr.max())
     lc = LineCollection(segments, cmap='jet', norm=norm)
     lc.set_array(corr)
     lc.set_linewidth(2)
-    axs.add_collection(lc)
-    fig.colorbar(lc, ax=axs)
+    ax.add_collection(lc)
+    fig.colorbar(lc, ax=ax)
 
-    axs.set_xlim(x.min(), x.max())
-    axs.set_ylim(y.min(), y.max())
-    axs.invert_xaxis()
+    ax.set_xlim(x_plot.min(), x_plot.max())
+    ax.set_ylim(y_plot.min(), y_plot.max())
+    #ax.invert_xaxis()
 
-    # Axis ticks
+    # Configurar os ticks do eixo X com base nos rt_values
     min_rt = rt_values.min()
     max_rt = rt_values.max()
     ticksx = []
@@ -3258,28 +3588,29 @@ def STOCSY_LC_mode(target, X, rt_values, mode="linear"):
     currenttick = 0
     for rt_val in rt_values:
         if currenttick < len(ticks) and rt_val > ticks[currenttick]:
-            position = int((rt_val - min_rt) / (max_rt - min_rt) * x.max())
-            if position < len(x):
-                ticksx.append(x[position])
+            position = int((rt_val - min_rt) / (max_rt - min_rt) * x_plot.max())
+            if position < len(x_plot):
+                ticksx.append(x_plot[position])
                 tickslabels.append(ticks[currenttick])
             currenttick += 1
     plt.xticks(ticksx, tickslabels, fontsize=12)
 
-    axs.set_xlabel('Retention time (ppm)', fontsize=14)
-    axs.set_ylabel(f"Covariance with \n signal at {target:.2f} min", fontsize=14)
-    axs.set_title(f'STOCSY from signal at {target:.2f} min ({mode} model)', fontsize=16)
+    ax.set_xlabel('Retention time (min)', fontsize=14)
+    ax.set_ylabel(f"Covariance with \n signal at {target:.2f} min", fontsize=14)
+    ax.set_title(f'STOCSY from signal at {target:.2f} min ({mode} model)', fontsize=16)
 
-    text = axs.text(1, 1, '')
+    # Configurar função hover para visualização interativa
+    text = ax.text(1, 1, '')
     lnx = plt.plot([60, 60], [0, 1.5], color='black', linewidth=0.3)
     lny = plt.plot([0, 100], [1.5, 1.5], color='black', linewidth=0.3)
     lnx[0].set_linestyle('None')
     lny[0].set_linestyle('None')
 
     def hover(event):
-        if event.inaxes == axs:
-            inv = axs.transData.inverted()
-            maxcoord = axs.transData.transform((x[0], 0))[0]
-            mincoord = axs.transData.transform((x[-1], 0))[0]
+        if event.inaxes == ax:
+            inv = ax.transData.inverted()
+            maxcoord = ax.transData.transform((x_plot[0], 0))[0]
+            mincoord = ax.transData.transform((x_plot[-1], 0))[0]
             rt_val = ((maxcoord - mincoord) - (event.x - mincoord)) / (maxcoord - mincoord) * (max_rt - min_rt) + min_rt
             i = int(((maxcoord - mincoord) - (event.x - mincoord)) / (maxcoord - mincoord) * len(covar))
             if 0 <= i < len(covar):
@@ -3290,7 +3621,7 @@ def STOCSY_LC_mode(target, X, rt_values, mode="linear"):
                 text.set_text(f'{rt_val:.2f} min, covariance: {cov_val:.6f}, correlation: {cor_val:.2f}')
                 lnx[0].set_data([event.xdata, event.xdata], [-1, 1])
                 lnx[0].set_linestyle('--')
-                lny[0].set_data([x[0], x[-1]], [cov_val, cov_val])
+                lny[0].set_data([x_plot[0], x_plot[-1]], [cov_val, cov_val])
                 lny[0].set_linestyle('--')
         else:
             text.set_visible(False)
@@ -3304,12 +3635,112 @@ def STOCSY_LC_mode(target, X, rt_values, mode="linear"):
         os.mkdir('images')
     plt.savefig(f"images/stocsy_from_{target}min_{mode}.pdf", transparent=True, dpi=300)
 
+    import mpld3
     html_str = mpld3.fig_to_html(fig)
     with open(f"images/stocsy_interactive_{target}min_{mode}.html", "w") as f:
         f.write(html_str)
 
     plt.show()
     return corr, covar
+
+
+from tensorly.decomposition import parafac
+from tensorly import tensor
+import numpy as np
+import plotly.graph_objects as go
+import os
+from scipy.interpolate import interp1d
+
+def run_parafac_uv_analysis(normalized_scaled_df, rank=3, init='svd', n_iter_max=1000, tol=1e-6, output_dir="images"):
+    """
+    Perform PARAFAC analysis on UV data and save plots.
+
+    Parameters:
+    - normalized_scaled_df: DataFrame with first column = Retention Time, other columns = wavelength intensities (columns can have 'nm' suffix).
+    - rank: Number of components to extract.
+    - init: Initialization method ('svd', 'random', etc.).
+    - n_iter_max: Maximum number of iterations.
+    - tol: Convergence tolerance.
+    - output_dir: Directory to save plots.
+
+    Returns:
+    - weights: PARAFAC weights.
+    - factor_matrices: Tuple of factor matrices (retention_time_factors, wavelength_factors, ...).
+    """
+    # Prepare data
+    retention_times = normalized_scaled_df.iloc[:, 0].values
+
+    # FIX: Remove 'nm' from column names before converting to float (in case they're labeled like '190.64nm')
+    wavelengths = normalized_scaled_df.columns[1:].str.replace('nm', '', regex=False).astype(float)
+
+    wavelength_data = normalized_scaled_df.iloc[:, 1:].values
+
+    # Perform PARAFAC decomposition
+    tensor_data = tensor(wavelength_data)
+    weights, factor_matrices = parafac(
+        tensor_data,
+        rank=rank,
+        init=init,
+        n_iter_max=n_iter_max,
+        tol=tol
+    )
+
+    retention_time_factors, wavelength_factors = factor_matrices[:2]
+
+    # Interpolate wavelength factors to match the full wavelength range
+    interpolated_factors = []
+    original_wavelengths = np.linspace(wavelengths.min(), wavelengths.max(), wavelength_factors.shape[0])
+    for i in range(wavelength_factors.shape[1]):
+        interp_func = interp1d(original_wavelengths, wavelength_factors[:, i], kind='linear', fill_value="extrapolate")
+        interpolated_factors.append(interp_func(wavelengths))
+    interpolated_factors = np.array(interpolated_factors).T
+
+    # Create output directory
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Plot Retention Time Factors (interactive)
+    fig = go.Figure()
+    for i in range(rank):
+        fig.add_trace(go.Scatter(
+            x=retention_times,
+            y=retention_time_factors[:, i],
+            mode='lines',
+            name=f'Component {i + 1}'
+        ))
+    fig.update_layout(
+        title='Retention Time Factors',
+        xaxis_title='Retention Time (min)',
+        yaxis_title='Factor Value',
+        hovermode='x unified',
+        template='plotly_white'
+    )
+    html_output = os.path.join(output_dir, 'retention_time_factors.html')
+    fig.write_html(html_output)
+    print(f"Retention Time Factors plot saved to: {html_output}")
+
+    # Plot Wavelength Factors (interactive)
+    fig2 = go.Figure()
+    for i in range(rank):
+        fig2.add_trace(go.Scatter(
+            x=wavelengths,
+            y=interpolated_factors[:, i],
+            mode='lines',
+            name=f'Component {i + 1}'
+        ))
+    fig2.update_layout(
+        title='Wavelength Factors',
+        xaxis_title='Wavelength (nm)',
+        yaxis_title='Factor Value',
+        hovermode='x unified',
+        template='plotly_white'
+    )
+    html_output2 = os.path.join(output_dir, 'wavelength_factors.html')
+    fig2.write_html(html_output2)
+    print(f"Wavelength Factors plot saved to: {html_output2}")
+
+    return weights, (retention_time_factors, interpolated_factors)
+
+
 
 # --------------------------------------------------------------------------
 #                    10) Data-Export
