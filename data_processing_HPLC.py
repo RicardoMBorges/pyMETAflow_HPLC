@@ -149,39 +149,56 @@ import os
 import pandas as pd
 
 def extract_rt_and_wavelength_fixed(input_file, target_wavelength):
-    with open(input_file, 'r', encoding='latin1') as file:
-        lines = file.readlines()
-
-    header_idx = next((i for i, line in enumerate(lines) if "R.Time (min)" in line), None)
-    if header_idx is None:
-        raise ValueError("Header with 'R.Time (min)' not found.")
-
-    for i in range(header_idx + 1, len(lines)):
-        parts = lines[i].strip().split('\t')[1:]
-        if all(p.strip().isdigit() for p in parts):
-            wl_idx = i
-            break
-    else:
-        raise ValueError("No numeric wavelength row found.")
-
-    wavelengths = [int(w) / 100 for w in lines[wl_idx].strip().split('\t')[1:]]
-    col_index = min(range(len(wavelengths)), key=lambda i: abs(wavelengths[i] - target_wavelength))
-    selected_wavelength = round(wavelengths[col_index], 2)
-
+    selected_wavelength = None
+    col_index = None
     data = []
-    for line in lines[wl_idx + 1:]:
-        parts = line.strip().split('\t')
-        if len(parts) <= col_index + 1:
-            continue
-        try:
-            rt = float(parts[0].replace(',', '.'))
-            intensity = float(parts[col_index + 1].replace(',', '.'))
-            data.append((rt, intensity))
-        except ValueError:
-            continue
+    header_count = 0
+    header_line_index = None
+    wl_row_found = False
+
+    with open(input_file, 'r', encoding='latin1') as file:
+        for line_num, line in enumerate(file):
+            line = line.strip()
+            if "R.Time (min)" in line:
+                header_count += 1
+                if header_count == 2:
+                    header_line_index = line_num
+                continue
+
+            # Skip lines until the second header is found
+            if header_count < 2:
+                continue
+
+            # After second header, find numeric wavelength row
+            if not wl_row_found:
+                parts = line.split('\t')[1:]
+                if all(p.strip().isdigit() for p in parts):
+                    wavelengths = [int(w) / 100 for w in parts]
+                    col_index = min(range(len(wavelengths)), key=lambda i: abs(wavelengths[i] - target_wavelength))
+                    selected_wavelength = round(wavelengths[col_index], 2)
+                    wl_row_found = True
+                continue
+
+            # From now on, read data
+            parts = line.split('\t')
+            if len(parts) <= col_index + 1:
+                continue
+            try:
+                rt = float(parts[0].replace(',', '.'))
+                intensity = float(parts[col_index + 1].replace(',', '.'))
+                data.append((rt, intensity))
+            except ValueError:
+                continue
+
+    if selected_wavelength is None:
+        raise ValueError(f"Failed to locate wavelength or data in file: {input_file}")
 
     df = pd.DataFrame(data, columns=['RT(min)', f'Intensity_{selected_wavelength}nm'])
     return df
+
+
+
+from tqdm import tqdm  # add this import
 
 def import_3D_data(input_folder, target_wavelength=254.0, output_filename='combined_wavelength_data.csv'):
     combined_df = None
@@ -190,18 +207,21 @@ def import_3D_data(input_folder, target_wavelength=254.0, output_filename='combi
     output_folder = os.path.join(input_folder, 'data')
     os.makedirs(output_folder, exist_ok=True)
 
-    for filename in os.listdir(input_folder):
-        if filename.lower().endswith('.txt'):
-            file_path = os.path.join(input_folder, filename)
-            try:
-                df = extract_rt_and_wavelength_fixed(file_path, target_wavelength)
-                df.rename(columns={df.columns[1]: os.path.splitext(filename)[0]}, inplace=True)
-                if combined_df is None:
-                    combined_df = df
-                else:
-                    combined_df = pd.merge(combined_df, df, on='RT(min)', how='outer')
-            except Exception as e:
-                print(f"❌ Error processing {filename}: {e}")
+    txt_files = [f for f in os.listdir(input_folder) if f.lower().endswith('.txt')]
+
+    print(f"📂 Processing {len(txt_files)} files...")
+
+    for filename in tqdm(txt_files, desc="🔄 Importing", ncols=80):
+        file_path = os.path.join(input_folder, filename)
+        try:
+            df = extract_rt_and_wavelength_fixed(file_path, target_wavelength)
+            df.rename(columns={df.columns[1]: os.path.splitext(filename)[0]}, inplace=True)
+            if combined_df is None:
+                combined_df = df
+            else:
+                combined_df = pd.merge(combined_df, df, on='RT(min)', how='outer')
+        except Exception as e:
+            print(f"❌ Error processing {filename}: {e}")
 
     if combined_df is not None:
         combined_df.sort_values(by='RT(min)', inplace=True)
@@ -213,6 +233,7 @@ def import_3D_data(input_folder, target_wavelength=254.0, output_filename='combi
         print("⚠️ No data combined.")
 
     return combined_df
+
 
 
 ### Remove ends          
