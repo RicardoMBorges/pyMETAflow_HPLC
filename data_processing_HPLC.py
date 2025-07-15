@@ -152,46 +152,50 @@ def extract_rt_and_wavelength_fixed(input_file, target_wavelength):
     selected_wavelength = None
     col_index = None
     data = []
-    header_count = 0
-    header_line_index = None
     wl_row_found = False
 
+    # Lê todas as linhas do arquivo
     with open(input_file, 'r', encoding='latin1') as file:
-        for line_num, line in enumerate(file):
-            line = line.strip()
-            if "R.Time (min)" in line:
-                header_count += 1
-                if header_count == 2:
-                    header_line_index = line_num
-                continue
+        lines = file.readlines()
 
-            # Skip lines until the second header is found
-            if header_count < 2:
-                continue
+    # Encontra o índice da última linha que contém "R.Time (min)"
+    header_line_index = None
+    for i, line in enumerate(lines):
+        if "R.Time (min)" in line:
+            header_line_index = i
 
-            # After second header, find numeric wavelength row
-            if not wl_row_found:
-                parts = line.split('\t')[1:]
-                if all(p.strip().isdigit() for p in parts):
-                    wavelengths = [int(w) / 100 for w in parts]
-                    col_index = min(range(len(wavelengths)), key=lambda i: abs(wavelengths[i] - target_wavelength))
-                    selected_wavelength = round(wavelengths[col_index], 2)
-                    wl_row_found = True
-                continue
+    if header_line_index is None:
+        raise ValueError(f"❌ 'R.Time (min)' not found in file: {input_file}")
 
-            # From now on, read data
-            parts = line.split('\t')
-            if len(parts) <= col_index + 1:
-                continue
+    # Processa as linhas a partir da última ocorrência
+    for line in lines[header_line_index + 1:]:
+        line = line.strip()
+
+        # Detecta linha de comprimentos de onda
+        if not wl_row_found:
+            parts = line.split('\t')[1:]
             try:
-                rt = float(parts[0].replace(',', '.'))
-                intensity = float(parts[col_index + 1].replace(',', '.'))
-                data.append((rt, intensity))
+                wavelengths = [float(w.replace(',', '.')) / 100 for w in parts]
+                col_index = min(range(len(wavelengths)), key=lambda i: abs(wavelengths[i] - target_wavelength))
+                selected_wavelength = round(wavelengths[col_index], 2)
+                wl_row_found = True
             except ValueError:
                 continue
+            continue
+
+        # Lê os dados (RT e intensidade)
+        parts = line.split('\t')
+        if len(parts) <= col_index + 1:
+            continue
+        try:
+            rt = float(parts[0].replace(',', '.'))
+            intensity = float(parts[col_index + 1].replace(',', '.'))
+            data.append((rt, intensity))
+        except ValueError:
+            continue
 
     if selected_wavelength is None:
-        raise ValueError(f"Failed to locate wavelength or data in file: {input_file}")
+        raise ValueError(f"❌ Failed to locate wavelength or data in file: {input_file}")
 
     df = pd.DataFrame(data, columns=['RT(min)', f'Intensity_{selected_wavelength}nm'])
     return df
@@ -787,6 +791,59 @@ def compare_normalization_plots(
     
     # Show the final figure
     plt.show()
+
+    
+import os
+import pandas as pd
+from itertools import permutations
+
+def calculate_keq_ratios(auc_values_df, save_path="data/keq_ratios.csv"):
+    df = auc_values_df.copy()
+    df.index = df.index.astype(str)
+
+    # Split index assuming format like "SS17 INF"
+    try:
+        prefix_position_df = df.index.to_series().str.split(" ", n=1, expand=True)
+        prefix_position_df.columns = ["Prefix", "Position"]
+        prefix_position_df["Position"] = prefix_position_df["Position"].str.upper()
+    except Exception as e:
+        print(f"❗ Error splitting sample names: {e}")
+        return pd.DataFrame()
+
+    # Add extracted parts back to the dataframe
+    df["Prefix"] = prefix_position_df["Prefix"].values
+    df["Position"] = prefix_position_df["Position"].values
+
+    # Set MultiIndex for easier grouping
+    df = df.set_index(["Prefix", "Position"])
+
+    # Compute Keq ratios
+    keq_data = {}
+    for prefix in df.index.get_level_values(0).unique():
+        available_positions = df.loc[prefix].index.tolist()
+        for pos1, pos2 in permutations(available_positions, 2):
+            try:
+                val1 = df.loc[(prefix, pos1)]
+                val2 = df.loc[(prefix, pos2)]
+                keq_data[(prefix, f"{pos1}/{pos2}")] = val1 / val2
+            except Exception as e:
+                print(f"❗ Error computing Keq for {prefix} {pos1}/{pos2}: {e}")
+
+    if not keq_data:
+        print("⚠️ No Keq ratios could be calculated.")
+        return pd.DataFrame()
+
+    keq_df = pd.DataFrame.from_dict(keq_data, orient="index")
+    keq_df.index = pd.MultiIndex.from_tuples(keq_df.index, names=["Sample", "Keq Ratio"])
+
+    # Save to CSV
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    keq_df.to_csv(save_path)
+    print(f"✅ Keq ratios saved to: {save_path}")
+
+    return keq_df
+
+
 
 
 import os
